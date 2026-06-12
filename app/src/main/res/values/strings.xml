@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Take a Sec</string>
+    <string name="accessibility_service_label">Take a Sec Intervention Service</string>
+    <string name="accessibility_service_description">This service is used to detect when monitored social media and other apps are opened, allowing Take a Sec to show a breathing exercise before you enter them. It collects no private user data.</string>
+</resources>
