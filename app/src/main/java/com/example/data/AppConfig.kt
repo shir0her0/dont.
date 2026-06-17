@@ -7,5 +7,6 @@ import androidx.room.PrimaryKey
 data class AppConfig(
     @PrimaryKey val packageName: String,
     val appName: String,
-    val isMonitored: Boolean = false
+    val isMonitored: Boolean = false,
+    val reInterventionMinutes: Int = 0
 )

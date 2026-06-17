@@ -1,5 +1,5 @@
 {
-  "name": "Take a Sec",
+  "name": "don't",
   "description": "Break habitual app opening and restore mindfulness through gentle breathing interventions.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

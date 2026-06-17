@@ -17,11 +17,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.PI
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -107,10 +111,10 @@ fun InterventionScreenContent(
     val repository = app.repository
 
     // State loaded from DB
-    var mindfulnessText by remember { mutableStateOf("Take a breath...") }
+    var mindfulnessText by remember { mutableStateOf("Its time to take a deep breathe.") }
     var delayDurationSeconds by remember { mutableIntStateOf(5) }
     var appLabel by remember { mutableStateOf(packageName) }
-    var attemptsLast24h by remember { mutableIntStateOf(1) }
+    var changedMindTimesToday by remember { mutableIntStateOf(0) }
     var lastUseText by remember { mutableStateOf("Never before") }
 
     // Countdown state
@@ -121,7 +125,12 @@ fun InterventionScreenContent(
     LaunchedEffect(packageName) {
         // Load Settings
         val currentSettings = repository.settings.first()
-        mindfulnessText = currentSettings.mindfulnessText
+        var text = currentSettings.mindfulnessText
+        if (text == "Take a breath. Do you really want to open this app?") {
+            text = "Its time to take a deep breathe."
+            repository.saveSettings(currentSettings.copy(mindfulnessText = text))
+        }
+        mindfulnessText = text
         delayDurationSeconds = currentSettings.delayDurationSeconds
         countdownRemaining = currentSettings.delayDurationSeconds
 
@@ -134,12 +143,18 @@ fun InterventionScreenContent(
             appLabel = packageName.split(".").lastOrNull() ?: packageName
         }
 
-        // Get count of interventions in last 24h
+        // Get count of interventions from start of today
         val logs = repository.allLogs.firstOrNull() ?: emptyList()
-        val limit24h = System.currentTimeMillis() - (24 * 60 * 60 * 1000)
-        
         val appLogs = logs.filter { it.packageName == packageName }
-        attemptsLast24h = appLogs.count { it.timestamp >= limit24h } + 1 // Add 1 for current attempt
+
+        val calendar = java.util.Calendar.getInstance()
+        calendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        calendar.set(java.util.Calendar.MINUTE, 0)
+        calendar.set(java.util.Calendar.SECOND, 0)
+        calendar.set(java.util.Calendar.MILLISECOND, 0)
+        val todayStartMs = calendar.timeInMillis
+
+        changedMindTimesToday = appLogs.filter { it.timestamp >= todayStartMs }.count { it.wasCancelled }
 
         val previousAttempt = appLogs.firstOrNull()
         if (previousAttempt != null) {
@@ -167,41 +182,24 @@ fun InterventionScreenContent(
         isCountdownFinished = true
     }
 
-    // Breathing pulse scale animation
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    
-    // Smooth breathing scale
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 0.85f,
-        targetValue = 1.35f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4000, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scale"
-    )
+    // Breath Progress Animatable to run exactly ONCE over the countdown duration
+    val animProgress = remember { Animatable(0f) }
+    LaunchedEffect(delayDurationSeconds) {
+        val halfDurationMs = (delayDurationSeconds * 1000L / 2).coerceAtLeast(100L).toInt()
+        animProgress.animateTo(
+            targetValue = 1f,
+            animationSpec = tween(durationMillis = halfDurationMs, easing = EaseInOutSine)
+        )
+        animProgress.animateTo(
+            targetValue = 0f,
+            animationSpec = tween(durationMillis = halfDurationMs, easing = EaseInOutSine)
+        )
+    }
 
-    // Smooth breathing alpha for the background and halos
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 0.7f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4000, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseAlpha"
-    )
-
-    // A secondary slower breathing scale for asynchronous multi-layer ripple depth!
-    val depthScale by infiniteTransition.animateFloat(
-        initialValue = 0.8f,
-        targetValue = 1.5f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 6000, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "depthScale"
-    )
+    val scale = 1.0f + 0.45f * animProgress.value
+    val pulseAlpha = 0.25f + 0.45f * animProgress.value
+    val breathingOffset = 15f + 60f * animProgress.value
+    val rotationAngle = 60f * animProgress.value
 
     // Sleek interface breathing canvas background (radial gradient expansion)
     Box(
@@ -220,27 +218,20 @@ fun InterventionScreenContent(
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
-        // App header guidance
+        // App header guidance (Brought lower down from the top)
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 30.dp),
+                .padding(top = 80.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Image(
                 painter = painterResource(id = com.example.R.drawable.ic_logo_transparent),
-                contentDescription = "Take a Sec Logo",
+                contentDescription = "don't Logo",
                 modifier = Modifier
                     .size(64.dp)
                     .padding(bottom = 12.dp)
             )
-            Text(
-                text = "You're about to open $appLabel",
-                color = Color(0xFFB0B3BC),
-                style = MaterialTheme.typography.titleMedium,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = mindfulnessText,
                 color = Color.White,
@@ -252,102 +243,63 @@ fun InterventionScreenContent(
             )
         }
 
-        // Multi-level expressive breathing halos
+        // Overlapping breathing circles animation (Rosette flower resembling the premium Apple Breathe layout, slightly larger)
         Box(
             modifier = Modifier
-                .size(320.dp)
-                .scale(depthScale)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            Color(0x22EC3872),
-                            Color(0x05EC3872),
-                            Color.Transparent
-                        )
-                    )
-                ),
+                .size(350.dp)
+                .scale(scale),
             contentAlignment = Alignment.Center
         ) {
-            // Inner pulsing halo
-            Box(
-                modifier = Modifier
-                    .size(220.dp)
-                    .scale(scale)
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                Color(0xFFEC3872).copy(alpha = pulseAlpha * 0.35f),
-                                Color(0xFFEC3872).copy(alpha = pulseAlpha * 0.08f),
-                                Color.Transparent
-                            )
-                        )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                // Solid soft core
+            val numCircles = 6
+            for (i in 0 until numCircles) {
+                // Compute the radian angle offset for each of the 6 petals
+                val angleRad = ((i * (360f / numCircles)) + rotationAngle) * (PI / 180f)
+                val dx = (breathingOffset * cos(angleRad)).toFloat()
+                val dy = (breathingOffset * sin(angleRad)).toFloat()
+
                 Box(
                     modifier = Modifier
-                        .size(120.dp)
+                        .size(150.dp)
+                        .offset(x = dx.dp, y = dy.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFFEC3872).copy(alpha = 0.15f))
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color(0xFFFF528E).copy(alpha = 0.45f), // Glowing bright hot pink
+                                    Color(0xFF860462).copy(alpha = 0.12f)  // Soft mysterious deep magenta
+                                )
+                            )
+                        )
                 )
             }
         }
 
-        // Inner Countdown Indicator (Overlaid exactly inside circle)
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            if (!isCountdownFinished) {
-                Text(
-                    text = "$countdownRemaining",
-                    style = MaterialTheme.typography.displayMedium,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Breathe",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFDCC1FF),
-                    letterSpacing = 2.sp
-                )
-            } else {
-                Text(
-                    text = "✓",
-                    style = MaterialTheme.typography.displayLarge,
-                    color = Color(0xFF72EDCB),
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        // Adaptive details: Attempts counter
+        // Adaptive details: Attempts counter (Made slightly smaller as requested)
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 180.dp),
+                .padding(bottom = 185.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "$attemptsLast24h",
-                style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-            Text(
-                text = "attempts to open $appLabel within the last 24 hours.",
+                text = "You changed your mind",
                 style = MaterialTheme.typography.bodyMedium,
-                color = Color(0xFFB0B3BC),
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 32.dp)
+                color = Color(0xFF8A8F9E),
+                textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "$changedMindTimesToday times today.",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = "Last use: $lastUseText",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF8A8F9E)
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFF6C717C)
             )
         }
 
@@ -428,7 +380,7 @@ fun InterventionScreenContent(
                 shape = CircleShape
             ) {
                 Text(
-                    text = if (isCountdownFinished) "Continue to $appLabel" else "Breathe for a sec...",
+                    text = if (isCountdownFinished) "Continue to $appLabel" else "Breathe for a sec ($countdownRemaining s)",
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp
                 )

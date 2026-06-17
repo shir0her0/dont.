@@ -16,6 +16,7 @@ class TakeASecRepository(private val context: Context, private val dao: TakeASec
 
     private val repositoryScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     private val cachedMonitoredPackages = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val reInterventionCache = ConcurrentHashMap<String, Int>()
 
     // Transient memory of bypassed packages to prevent loops after "Open App/Continue"
     // PackageName -> Expiration Timestamp (System.currentTimeMillis())
@@ -33,8 +34,12 @@ class TakeASecRepository(private val context: Context, private val dao: TakeASec
         repositoryScope.launch {
             monitoredConfigs.collect { configs ->
                 cachedMonitoredPackages.clear()
-                configs.forEach { cachedMonitoredPackages.add(it.packageName) }
-                Log.d("TakeASecRepo", "Cached monitored packages updated: $cachedMonitoredPackages")
+                reInterventionCache.clear()
+                configs.forEach { 
+                    cachedMonitoredPackages.add(it.packageName)
+                    reInterventionCache[it.packageName] = it.reInterventionMinutes
+                }
+                Log.d("TakeASecRepo", "Cached monitored packages updated: $cachedMonitoredPackages, reInterventions: $reInterventionCache")
             }
         }
     }
@@ -87,6 +92,15 @@ class TakeASecRepository(private val context: Context, private val dao: TakeASec
     // Toggle monitoring status
     suspend fun setMonitoringStatus(packageName: String, isMonitored: Boolean) = withContext(Dispatchers.IO) {
         dao.updateMonitoringStatus(packageName, isMonitored)
+    }
+
+    // Update re-intervention timer setting
+    suspend fun setReInterventionSetting(packageName: String, minutes: Int) = withContext(Dispatchers.IO) {
+        dao.updateReInterventionSetting(packageName, minutes)
+    }
+
+    fun getReInterventionMinutes(packageName: String): Int {
+        return reInterventionCache[packageName] ?: 0
     }
 
     // Insert app configuration

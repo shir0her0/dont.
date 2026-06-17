@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 
 @Database(
     entities = [AppConfig::class, InterventionLog::class, Settings::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class TakeASecDatabase : RoomDatabase() {

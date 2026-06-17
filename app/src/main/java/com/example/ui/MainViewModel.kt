@@ -15,7 +15,8 @@ data class AppStats(
     val packageName: String,
     val appName: String,
     val totalInterventions: Int,
-    val minutesSaved: Int
+    val minutesSaved: Int,
+    val reInterventionMinutes: Int = 0
 )
 
 data class DashboardUiState(
@@ -70,7 +71,8 @@ class MainViewModel(private val repository: TakeASecRepository) : ViewModel() {
                 packageName = config.packageName,
                 appName = config.appName,
                 totalInterventions = totalInterventionsCount,
-                minutesSaved = appMinutesSaved
+                minutesSaved = appMinutesSaved,
+                reInterventionMinutes = config.reInterventionMinutes
             )
         }.sortedByDescending { it.totalInterventions }
 
@@ -127,6 +129,12 @@ class MainViewModel(private val repository: TakeASecRepository) : ViewModel() {
     fun removeMonitoredApp(packageName: String) {
         viewModelScope.launch {
             repository.setMonitoringStatus(packageName, isMonitored = false)
+        }
+    }
+
+    fun updateReInterventionSetting(packageName: String, minutes: Int) {
+        viewModelScope.launch {
+            repository.setReInterventionSetting(packageName, minutes)
         }
     }
 

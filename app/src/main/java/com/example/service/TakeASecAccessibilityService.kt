@@ -1,7 +1,10 @@
 package com.example.service
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -18,19 +21,40 @@ class TakeASecAccessibilityService : AccessibilityService() {
 
     // Track the package that currently has an active, bypassed usage session
     private var activeSessionPackage: String? = null
-    private var activeSessionLastFocusedTime: Long = 0L
+    private var timeTransitionedAwayFromActivePackage: Long = 0L
+    private var sessionStartedTime: Long = 0L
 
-    // Known system/utility packages to ignore for session invalidation
-    private val knownSystemPackages = setOf(
-        "com.android.systemui",
-        "com.android.settings",
-        "android"
-    )
     private val launcherPackages = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    // Broadcast receiver to detect screen turn-off events and lock session.
+    private val screenEventsReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                if (activeSessionPackage != null && timeTransitionedAwayFromActivePackage == 0L) {
+                    timeTransitionedAwayFromActivePackage = System.currentTimeMillis()
+                    Log.d("TakeASecService", "Screen turned off. Starting away timer for $activeSessionPackage.")
+                }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         updateLauncherPackages()
+        try {
+            registerReceiver(screenEventsReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
+        } catch (e: Exception) {
+            Log.e("TakeASecService", "Error registering screen broadcast receiver", e)
+        }
+    }
+
+    override fun onDestroy() {
+        try {
+            unregisterReceiver(screenEventsReceiver)
+        } catch (e: Exception) {
+            Log.e("TakeASecService", "Error unregistering receiver", e)
+        }
+        super.onDestroy()
     }
 
     private fun updateLauncherPackages() {
@@ -51,10 +75,23 @@ class TakeASecAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun isSystemOrLauncher(pkg: String): Boolean {
+    /**
+     * Determines whether the focused package represents a completely transient helper overlay
+     * (e.g. keyboard, dialer, autofill popup, volume panel) that should NOT be considered "leaving the app".
+     */
+    private fun isTransientHelper(pkg: String): Boolean {
         if (pkg == this.packageName) return true
-        if (knownSystemPackages.contains(pkg)) return true
-        if (launcherPackages.contains(pkg)) return true
+        
+        val lower = pkg.lowercase()
+        // Ignore keyboards/input methods
+        if (lower.contains("inputmethod") || lower.contains("keyboard") || lower.contains("ime") || lower.contains("honeyboard")) return true
+        // Ignore phone dialer, calls, system overlays related to calling
+        if (lower.contains("dialer") || lower.contains("telephony") || lower.contains("incallui") || lower.contains("phone") || lower.contains("call")) return true
+        // Ignore Android play services autofill, text selection, permission, and credential overlays
+        if (pkg == "com.google.android.gms" || pkg == "com.android.credentialmanager") return true
+        // Ignore transient system packages (volume panel, screenshot overlays, power menu inside SystemUI)
+        if (pkg == "com.android.systemui" || pkg == "android") return true
+        
         return false
     }
 
@@ -67,66 +104,94 @@ class TakeASecAccessibilityService : AccessibilityService() {
             val app = application as? TakeASecApplication ?: return
             val repository = app.repository
 
-            if (isSystemOrLauncher(packageName)) {
-                // User is in system space, settings, our app, or the launcher.
-                // Keep the current session alive but let time-spent count towards inactivity.
-                // If they stay away in system/launcher for more than 20 seconds, clear the active session.
-                if (activeSessionPackage != null) {
-                    val timeSinceLastFocus = System.currentTimeMillis() - activeSessionLastFocusedTime
-                    if (timeSinceLastFocus > 20000) {
-                        Log.d("TakeASecService", "Session for $activeSessionPackage invalidated due to 20s away")
-                        activeSessionPackage = null
-                    }
-                }
+            // 1. If it's a completely transient helper overlay, do absolutely nothing. We maintain the current session untouched.
+            if (isTransientHelper(packageName)) {
+                Log.d("TakeASecService", "Transient helper focused: $packageName. Maintaining active session state.")
                 return
             }
 
-            // At this point, the user is in a normal non-system/non-launcher user app.
-            
-            // First, if they were in an active session, check if they spent too long away (e.g. phone locked for an hour)
-            if (activeSessionPackage != null) {
-                val timeSinceLastFocus = System.currentTimeMillis() - activeSessionLastFocusedTime
-                if (timeSinceLastFocus > 20000) {
-                    Log.d("TakeASecService", "Session for $activeSessionPackage invalidated due to inactivity ($timeSinceLastFocus ms)")
-                    activeSessionPackage = null
-                }
-            }
-
-            // If we transitioned to a different user app, invalidate the previous session immediately
-            if (activeSessionPackage != null && activeSessionPackage != packageName) {
-                Log.d("TakeASecService", "Session for $activeSessionPackage invalidated because user switched to: $packageName")
+            // 2. If focus shifted directly to another monitored app, invalidate previous session immediately.
+            if (activeSessionPackage != null && activeSessionPackage != packageName && repository.isPackageMonitored(packageName)) {
+                Log.d("TakeASecService", "Session for $activeSessionPackage invalidated because user switched directly to another monitored app: $packageName")
                 activeSessionPackage = null
+                timeTransitionedAwayFromActivePackage = 0L
             }
 
-            // If returning to or continuing the active session
+            // 3. If we are currently inside or returning to the active session package
             if (packageName == activeSessionPackage) {
-                activeSessionLastFocusedTime = System.currentTimeMillis()
-                Log.d("TakeASecService", "Continuing active session for $packageName, updating timestamp")
+                // Check if re-intervention timer has run out
+                val reInterventionMin = repository.getReInterventionMinutes(packageName)
+                if (reInterventionMin > 0) {
+                    val spentMs = System.currentTimeMillis() - sessionStartedTime
+                    val spentMinutes = spentMs / (1000L * 60)
+                    if (spentMinutes >= reInterventionMin) {
+                        Log.d("TakeASecService", "Re-intervention triggered! Focused check inside $packageName shows elapsed time of $spentMinutes minutes exceeds allowed limit $reInterventionMin.")
+                        // Invalidate active session & clear bypass duration to trigger an immediate new intervention
+                        activeSessionPackage = null
+                        sessionStartedTime = 0L
+                        timeTransitionedAwayFromActivePackage = 0L
+                        repository.clearBypass(packageName)
+
+                        if (repository.shouldIntercept(packageName)) {
+                            Log.d("TakeASecService", "Intercepting app via Re-intervention: $packageName")
+                            val intent = Intent(this@TakeASecAccessibilityService, InterventionActivity::class.java).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or 
+                                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or 
+                                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                putExtra("TARGET_PACKAGE_NAME", packageName)
+                            }
+                            startActivity(intent)
+                        }
+                        return
+                    }
+                }
+
+                // Check if we were away from the active app package for too long
+                if (timeTransitionedAwayFromActivePackage > 0L) {
+                    val awayTime = System.currentTimeMillis() - timeTransitionedAwayFromActivePackage
+                    if (awayTime > 25000L) { // 25 seconds away timeout
+                        Log.d("TakeASecService", "Session for $activeSessionPackage invalidated due to being away for $awayTime ms")
+                        activeSessionPackage = null
+                        timeTransitionedAwayFromActivePackage = 0L
+                    } else {
+                        // Returned within away timeout, keep session alive
+                        Log.d("TakeASecService", "Returned to $activeSessionPackage within away timeout ($awayTime ms)")
+                        timeTransitionedAwayFromActivePackage = 0L
+                        return
+                    }
+                } else {
+                    // Continuing inside active session without leaving
+                    return
+                }
+            }
+
+            // 4. If focused screen is a non-monitored package (which is not a transient helper, i.e. laundry, settings, or other normal app)
+            // we start the "away" tracker to monitor how long the user stays away from the active package.
+            if (!repository.isPackageMonitored(packageName)) {
+                if (activeSessionPackage != null && timeTransitionedAwayFromActivePackage == 0L) {
+                    Log.d("TakeASecService", "Exited active package $activeSessionPackage to $packageName. Starting away timer.")
+                    timeTransitionedAwayFromActivePackage = System.currentTimeMillis()
+                }
                 return
             }
 
-            // Check if the newly focused user app is monitored
-            if (repository.isPackageMonitored(packageName)) {
-                if (repository.shouldIntercept(packageName)) {
-                    Log.d("TakeASecService", "Intercepting app: $packageName")
-                    
-                    val intent = Intent(this@TakeASecAccessibilityService, InterventionActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or 
-                                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or 
-                                Intent.FLAG_ACTIVITY_CLEAR_TOP
-                        putExtra("TARGET_PACKAGE_NAME", packageName)
-                    }
-                    startActivity(intent)
-                } else {
-                    // It is monitored but currently bypassed (user just completed breathing)
-                    // Start a new active session!
-                    activeSessionPackage = packageName
-                    activeSessionLastFocusedTime = System.currentTimeMillis()
-                    Log.d("TakeASecService", "New active session started for bypassed app: $packageName")
+            // 5. Package is monitored but currently has no active session or session was invalidated. Check if bypass active
+            if (repository.shouldIntercept(packageName)) {
+                Log.d("TakeASecService", "Intercepting app: $packageName")
+                
+                val intent = Intent(this@TakeASecAccessibilityService, InterventionActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or 
+                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or 
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    putExtra("TARGET_PACKAGE_NAME", packageName)
                 }
+                startActivity(intent)
             } else {
-                // Focus shifted to a non-monitored user-centric app. Ensure no active session remains.
-                activeSessionPackage = null
+                // Currently bypassed (user just completed breathing). Start a new active session!
+                activeSessionPackage = packageName
+                sessionStartedTime = System.currentTimeMillis()
+                timeTransitionedAwayFromActivePackage = 0L
+                Log.d("TakeASecService", "New active session started for bypassed app: $packageName at $sessionStartedTime")
             }
         }
     }

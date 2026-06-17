@@ -25,6 +25,9 @@ interface TakeASecDao {
     @Query("UPDATE app_config SET isMonitored = :isMonitored WHERE packageName = :packageName")
     suspend fun updateMonitoringStatus(packageName: String, isMonitored: Boolean)
 
+    @Query("UPDATE app_config SET reInterventionMinutes = :minutes WHERE packageName = :packageName")
+    suspend fun updateReInterventionSetting(packageName: String, minutes: Int)
+
     @Query("DELETE FROM app_config WHERE packageName = :packageName")
     suspend fun deleteConfig(packageName: String)
 
